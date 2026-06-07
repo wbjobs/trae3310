@@ -36,6 +36,9 @@ var (
 	endTimeStr      string
 	limit           int
 	outputFormat    string
+	timeWindowStr   string
+	metricsNamespace string
+	metricsOutputFile string
 )
 
 var rootCmd = &cobra.Command{
