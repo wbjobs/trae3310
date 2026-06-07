@@ -1,0 +1,36 @@
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"trace-cli/pkg/output"
+)
+
+var bottleneckCmd = &cobra.Command{
+	Use:   "bottleneck",
+	Short: "分析跨服务调用瓶颈",
+	Long:  `分析追踪数据中的性能瓶颈，找出耗时占比最高的路径和跨服务调用。`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		opts, err := getFilterOptions()
+		if err != nil {
+			return err
+		}
+
+		bottlenecks := analyzerInstance.FindBottlenecks(opts)
+
+		switch outputFormat {
+		case "table":
+			output.PrintBottlenecks(bottlenecks, limit)
+		default:
+			return fmt.Errorf("不支持的输出格式: %s (支持: table)", outputFormat)
+		}
+
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(bottleneckCmd)
+}
