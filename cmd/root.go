@@ -12,6 +12,7 @@ import (
 	"trace-cli/pkg/config"
 	"trace-cli/pkg/grpcclient"
 	"trace-cli/pkg/storage"
+	"trace-cli/pkg/stream"
 )
 
 var (
@@ -20,6 +21,13 @@ var (
 	store      *storage.TraceStore
 	analyzerInstance *analyzer.Analyzer
 	grpcClient *grpcclient.Client
+
+	streamIndex     *stream.StreamIndex
+	streamAnalyzer  *stream.StreamAnalyzer
+	streamFlameGen  *stream.StreamFlameGenerator
+	useStreaming    bool
+	spillThreshold  int
+	tempDir         string
 
 	serviceFilter   string
 	operationFilter string
@@ -41,14 +49,26 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("加载配置文件失败: %w", err)
 		}
 
-		store = storage.NewTraceStore()
-		analyzerInstance = analyzer.NewAnalyzer(store)
+		if useStreaming {
+			streamIndex, err = stream.NewStreamIndex(tempDir, spillThreshold)
+			if err != nil {
+				return fmt.Errorf("创建流式索引器失败: %w", err)
+			}
+			streamAnalyzer = stream.NewStreamAnalyzer(streamIndex)
+			streamFlameGen = stream.NewStreamFlameGenerator(streamIndex)
+		} else {
+			store = storage.NewTraceStore()
+			analyzerInstance = analyzer.NewAnalyzer(store)
+		}
 
 		return nil
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		if grpcClient != nil {
 			grpcClient.Close()
+		}
+		if streamIndex != nil {
+			streamIndex.Close()
 		}
 	},
 }
@@ -69,6 +89,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&endTimeStr, "end-time", "", "结束时间 (RFC3339格式)")
 	rootCmd.PersistentFlags().IntVarP(&limit, "limit", "l", 0, "结果数量限制 (0表示无限制)")
 	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "f", "table", "输出格式: table|json|html|svg")
+	rootCmd.PersistentFlags().BoolVar(&useStreaming, "stream", false, "启用流式处理模式（处理大型trace时使用）")
+	rootCmd.PersistentFlags().IntVar(&spillThreshold, "spill-threshold", 10000, "内存span数量阈值，超过后写入磁盘")
+	rootCmd.PersistentFlags().StringVar(&tempDir, "temp-dir", "", "临时文件目录（默认系统临时目录）")
 }
 
 func getFilterOptions() (analyzer.FilterOptions, error) {
@@ -96,9 +119,30 @@ func getFilterOptions() (analyzer.FilterOptions, error) {
 	return opts, nil
 }
 
+func getStreamFilterOptions() stream.StreamFilterOptions {
+	opts := stream.StreamFilterOptions{
+		Service:   serviceFilter,
+		Operation: operationFilter,
+		TraceID:   traceIDFilter,
+	}
+
+	if startTimeStr != "" {
+		opts.StartTime, _ = time.Parse(time.RFC3339, startTimeStr)
+	}
+	if endTimeStr != "" {
+		opts.EndTime, _ = time.Parse(time.RFC3339, endTimeStr)
+	}
+
+	return opts
+}
+
 func initGRPCClient() error {
 	var err error
-	grpcClient, err = grpcclient.NewClient(configData, store)
+	if useStreaming && streamIndex != nil {
+		grpcClient, err = grpcclient.NewStreamingClient(configData, streamIndex)
+	} else {
+		grpcClient, err = grpcclient.NewClient(configData, store)
+	}
 	return err
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"trace-cli/pkg/models"
 	"trace-cli/pkg/storage"
+	"trace-cli/pkg/stream"
 )
 
 type TraceGenerator struct {
@@ -134,4 +135,18 @@ func generateID() string {
 func GenerateSampleData(store *storage.TraceStore, count int) {
 	gen := NewGenerator()
 	gen.GenerateTrace(count, store)
+}
+
+func (g *TraceGenerator) GenerateTraceForStream(numTraces int, index *stream.StreamIndex) {
+	for i := 0; i < numTraces; i++ {
+		trace := g.generateSingleTrace(i)
+		for _, span := range trace.Spans {
+			index.AddSpan(span)
+		}
+	}
+}
+
+func GenerateSampleDataForStream(index *stream.StreamIndex, count int) {
+	gen := NewGenerator()
+	gen.GenerateTraceForStream(count, index)
 }

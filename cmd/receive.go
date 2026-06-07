@@ -37,7 +37,25 @@ var receiveCmd = &cobra.Command{
 		case <-sigCh:
 			fmt.Println("\n🛑 收到停止信号，正在关闭...")
 			cancel()
-			fmt.Printf("📊 共接收 %d 条追踪数据\n", store.Len())
+			if useStreaming {
+				spanCount := streamIndex.MemoryUsage()
+				traceCount := streamIndex.TraceCount()
+				memorySpans := spillThreshold
+				if int(spanCount) < spillThreshold {
+					memorySpans = int(spanCount)
+				}
+				spilled := int64(0)
+				if spanCount > int64(spillThreshold) {
+					spilled = spanCount - int64(spillThreshold)
+				}
+				fmt.Printf("📊 流式模式统计:\n")
+				fmt.Printf("   - 接收Trace数量: %d\n", traceCount)
+				fmt.Printf("   - 接收Span总数: %d\n", spanCount)
+				fmt.Printf("   - 内存中Span数: %d\n", memorySpans)
+				fmt.Printf("   - 已溢出到磁盘: %d\n", spilled)
+			} else {
+				fmt.Printf("📊 共接收 %d 条追踪数据\n", store.Len())
+			}
 		case err := <-errCh:
 			if err != nil {
 				return fmt.Errorf("接收器错误: %w", err)

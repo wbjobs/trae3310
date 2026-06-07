@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -17,6 +18,7 @@ import (
 	"trace-cli/pkg/config"
 	"trace-cli/pkg/models"
 	"trace-cli/pkg/storage"
+	"trace-cli/pkg/stream"
 
 	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	common "go.opentelemetry.io/proto/otlp/common/v1"
@@ -25,12 +27,14 @@ import (
 )
 
 type Client struct {
-	conn     *grpc.ClientConn
-	server   *grpc.Server
-	cfg      *config.Config
-	traceCl  collectortrace.TraceServiceClient
-	store    *storage.TraceStore
-	listener net.Listener
+	conn        *grpc.ClientConn
+	server      *grpc.Server
+	cfg         *config.Config
+	traceCl     collectortrace.TraceServiceClient
+	store       *storage.TraceStore
+	streamIndex *stream.StreamIndex
+	listener    net.Listener
+	spanCount   atomic.Int64
 }
 
 func NewClient(cfg *config.Config, store *storage.TraceStore) (*Client, error) {
@@ -52,6 +56,25 @@ func NewClient(cfg *config.Config, store *storage.TraceStore) (*Client, error) {
 	}, nil
 }
 
+func NewStreamingClient(cfg *config.Config, index *stream.StreamIndex) (*Client, error) {
+	opts, err := buildDialOptions(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build dial options: %w", err)
+	}
+
+	conn, err := grpc.NewClient(cfg.Collector.Address, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to collector: %w", err)
+	}
+
+	return &Client{
+		conn:        conn,
+		cfg:         cfg,
+		traceCl:     collectortrace.NewTraceServiceClient(conn),
+		streamIndex: index,
+	}, nil
+}
+
 func (c *Client) StartReceiver(ctx context.Context, listenAddr string) error {
 	var err error
 	c.listener, err = net.Listen("tcp", listenAddr)
@@ -65,7 +88,13 @@ func (c *Client) StartReceiver(ctx context.Context, listenAddr string) error {
 	}
 
 	c.server = grpc.NewServer(serverOpts...)
-	collectortrace.RegisterTraceServiceServer(c.server, &traceReceiverServer{store: c.store})
+
+	receiver := &traceReceiverServer{
+		store:       c.store,
+		streamIndex: c.streamIndex,
+		spanCount:   &c.spanCount,
+	}
+	collectortrace.RegisterTraceServiceServer(c.server, receiver)
 
 	go func() {
 		<-ctx.Done()
@@ -81,12 +110,36 @@ func (c *Client) StartReceiver(ctx context.Context, listenAddr string) error {
 
 type traceReceiverServer struct {
 	collectortrace.UnimplementedTraceServiceServer
-	store *storage.TraceStore
+	store       *storage.TraceStore
+	streamIndex *stream.StreamIndex
+	spanCount   *atomic.Int64
 }
 
 func (s *traceReceiverServer) Export(ctx context.Context, req *collectortrace.ExportTraceServiceRequest) (*collectortrace.ExportTraceServiceResponse, error) {
+	if s.streamIndex != nil {
+		return s.exportStreaming(ctx, req)
+	}
+
 	spans := protoToSpans(req)
 	s.store.AddSpans(spans)
+	return &collectortrace.ExportTraceServiceResponse{}, nil
+}
+
+func (s *traceReceiverServer) exportStreaming(ctx context.Context, req *collectortrace.ExportTraceServiceRequest) (*collectortrace.ExportTraceServiceResponse, error) {
+	for _, rs := range req.ResourceSpans {
+		serviceName := getServiceName(rs.Resource)
+
+		for _, ss := range rs.ScopeSpans {
+			for _, span := range ss.Spans {
+				modelSpan := protoSpanToModel(span, serviceName)
+				if err := s.streamIndex.AddSpan(modelSpan); err != nil {
+					return nil, fmt.Errorf("failed to index span: %w", err)
+				}
+				s.spanCount.Add(1)
+			}
+		}
+	}
+
 	return &collectortrace.ExportTraceServiceResponse{}, nil
 }
 
@@ -289,7 +342,14 @@ func (c *Client) Close() error {
 	if c.listener != nil {
 		c.listener.Close()
 	}
+	if c.streamIndex != nil {
+		c.streamIndex.Close()
+	}
 	return c.conn.Close()
+}
+
+func (c *Client) GetSpanCount() int64 {
+	return c.spanCount.Load()
 }
 
 func (c *Client) Export(ctx context.Context, traces []*models.Trace) error {

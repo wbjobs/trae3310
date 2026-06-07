@@ -22,29 +22,39 @@ var flamegraphCmd = &cobra.Command{
 			return fmt.Errorf("必须指定 --trace-id 参数")
 		}
 
-		opts, err := getFilterOptions()
-		if err != nil {
-			return err
-		}
+		var fg *flamegraph.FlameGraph
+		var err error
 
-		traces := analyzerInstance.FilterTraces(opts)
-		if len(traces) == 0 {
-			return fmt.Errorf("未找到Trace ID为 %s 的追踪数据", traceIDFilter)
-		}
-
-		var trace *models.Trace
-		for _, t := range traces {
-			if t.TraceID == traceIDFilter {
-				trace = t
-				break
+		if useStreaming {
+			fg, err = streamFlameGen.GenerateFromTrace(traceIDFilter)
+			if err != nil {
+				return fmt.Errorf("生成火焰图失败: %w", err)
 			}
-		}
+		} else {
+			opts, errOpts := getFilterOptions()
+			if errOpts != nil {
+				return errOpts
+			}
 
-		if trace == nil {
-			return fmt.Errorf("未找到Trace ID为 %s 的追踪数据", traceIDFilter)
-		}
+			traces := analyzerInstance.FilterTraces(opts)
+			if len(traces) == 0 {
+				return fmt.Errorf("未找到Trace ID为 %s 的追踪数据", traceIDFilter)
+			}
 
-		fg := flamegraph.GenerateFromTrace(trace)
+			var trace *models.Trace
+			for _, t := range traces {
+				if t.TraceID == traceIDFilter {
+					trace = t
+					break
+				}
+			}
+
+			if trace == nil {
+				return fmt.Errorf("未找到Trace ID为 %s 的追踪数据", traceIDFilter)
+			}
+
+			fg = flamegraph.GenerateFromTrace(trace)
+		}
 
 		var outputPath string
 		if outputFile == "" {
@@ -74,6 +84,18 @@ var flamegraphCmd = &cobra.Command{
 
 		default:
 			return fmt.Errorf("不支持的输出格式: %s (支持: svg|html)", outputFormat)
+		}
+
+		if useStreaming {
+			memoryCount := streamIndex.MemoryUsage()
+			spilled := int64(0)
+			if memoryCount > int64(spillThreshold) {
+				spilled = memoryCount - int64(spillThreshold)
+			}
+			fmt.Printf("\n💾 流式模式: 总span数 %d, 内存中 %d 个, 已溢出到磁盘 %d 个\n",
+				memoryCount,
+				memoryCount-spilled,
+				spilled)
 		}
 
 		return nil
